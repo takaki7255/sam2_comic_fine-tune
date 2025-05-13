@@ -12,6 +12,7 @@ from peft import LoraConfig, get_peft_model, TaskType
 import numpy as np
 import cv2
 
+
 class SamSegTrainer(Trainer):
     """SAM2 用 – outputs.pred_masks を使って loss を計算"""
 
@@ -22,9 +23,10 @@ class SamSegTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch: int | None = None):
         # Trainer が batch を dict で渡す → 必要項目だけ取り出す
-        pixel_values = inputs.pop("pixel_values")
-        labels       = inputs.pop("labels")          # (B,1,1024,1024)
+        pixel_values = inputs.pop("pixel_values").to(device)  # ★
+        labels       = inputs.pop("labels").to(device)        # ★
         prompts      = inputs.pop("prompts")
+        prompts["points"] = prompts["points"].to(device)      # ★
 
         outputs = model(pixel_values=pixel_values, **prompts)
         # ──★ ① SAM2 は 3 枚返す → 最初の 1 枚だけ使う
@@ -45,13 +47,13 @@ class SamSegTrainer(Trainer):
 
         # ロギング用 IoU
         if self.state.is_world_process_zero:
-            with torch.no_grad():
-                self.iou_metric.update((probs > 0.5).long(), (labels > 0.5).long())
+            self.iou_metric.update((probs > 0.5).long(),
+                       (labels > 0.5).long())
 
         return (loss, outputs) if return_outputs else loss
 
     def log(self, logs, *args, **kwargs):        # 可変長で受け取る
-        if self.state.is_world_process_zero and self.iou_metric.total > 0:
+        if getattr(self.iou_metric, "tp", None) is not None and self.iou_metric.tp.numel() > 0:
             logs["train_iou"] = self.iou_metric.compute().item()
             self.iou_metric.reset()
         super().log(logs, *args, **kwargs)
@@ -84,8 +86,15 @@ val_ds = load_dataset(
 )["train"]
 
 # 1. ベースモデルをロード
-model = SamModel.from_pretrained("facebook/sam-vit-huge")
-processor = SamProcessor.from_pretrained("facebook/sam-vit-huge")
+# model = SamModel.from_pretrained("facebook/sam-vit-huge")
+# processor = SamProcessor.from_pretrained("facebook/sam-vit-huge")
+# huge → base へ
+model = SamModel.from_pretrained("facebook/sam-vit-base")
+processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)        # => cuda:0 / cpu
+model.to(device)
 
 # 2. ──★ ここでエンコーダ／プロンプトエンコーダを凍結 ──
 for p in model.vision_encoder.parameters():
