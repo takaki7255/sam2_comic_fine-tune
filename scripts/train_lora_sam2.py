@@ -7,7 +7,7 @@ from torchmetrics.classification import BinaryJaccardIndex
 from transformers import Trainer
 from PIL import Image
 from datasets import load_dataset
-from transformers import SamProcessor, SamModel, TrainingArguments, Trainer
+from transformers import SamProcessor, SamModel, TrainingArguments, Trainer, EarlyStoppingCallback
 from peft import LoraConfig, get_peft_model, TaskType
 import numpy as np
 import cv2
@@ -36,26 +36,33 @@ class SamSegTrainer(Trainer):
 
         # ---- 損失関数：BCE + Dice の複合例 ----------------------
         probs = logits.sigmoid()
-        bce   = F.binary_cross_entropy_with_logits(logits, labels.float())
+        labels_bin = (labels > 0.5).float()
+        bce  = F.binary_cross_entropy_with_logits(logits, labels_bin)
         # Dice = 1 - (2 * |X∩Y|) / (|X|+|Y|)
         eps   = 1e-6
         inter = (probs * labels).sum(dim=[1,2,3])
         union = (probs + labels).sum(dim=[1,2,3])
-        dice  = 1 - (2*inter + eps) / (union + eps)
-        loss  = bce + dice.mean()
+        # Dice：負にならないよう (1 - dice) ではなく (1 - dice).clamp(min=0)
+        dice_coeff = (2 * (probs * labels_bin).sum((1,2,3)) + eps) / \
+             ((probs + labels_bin).sum((1,2,3)) + eps)
+        dice = 1 - dice_coeff.mean()          # 0 <= dice <= 1
+        loss = bce + dice
         # --------------------------------------------------------
 
         # ロギング用 IoU
-        if self.state.is_world_process_zero:
-            self.iou_metric.update((probs > 0.5).long(),
-                       (labels > 0.5).long())
+        if model.training:
+            self.iou_metric.update(
+                (probs > 0.5).long(), (labels > 0.5).long()
+            )
 
         return (loss, outputs) if return_outputs else loss
 
-    def log(self, logs, *args, **kwargs):        # 可変長で受け取る
-        if getattr(self.iou_metric, "tp", None) is not None and self.iou_metric.tp.numel() > 0:
+    def log(self, logs, *args, **kwargs):
+        try:
             logs["train_iou"] = self.iou_metric.compute().item()
-            self.iou_metric.reset()
+            self.iou_metric.reset()          # 成功したときだけリセット
+        except (RuntimeError, ValueError):   # まだ update されていない場合
+            pass
         super().log(logs, *args, **kwargs)
 
 # ---- 1. COCO を読み込んで “画像ごとのアノテ一覧” を作る ----
@@ -168,6 +175,11 @@ def sam_collator(features):
     }
     return batch
 
+# EarlyStopping設定
+# trainer.add_callback(EarlyStoppingCallback(
+#     early_stopping_patience = 5,         # eval/loss が 5 回改善しなければ停止
+#     early_stopping_threshold = 0.001))   # 改善幅 0.001 以下を無視
+
 train_ds = train_ds.map(encode_example, fn_kwargs={"ann_map": train_ann_map})
 val_ds   = val_ds.map(encode_example, fn_kwargs={"ann_map": val_ann_map})
 
@@ -179,19 +191,24 @@ args = TrainingArguments(
     output_dir="checkpoints",
     per_device_train_batch_size=2,
     gradient_accumulation_steps=4,
-    num_train_epochs=20,
+    num_train_epochs=200,
     learning_rate=3e-5,
     warmup_ratio=0.1,
-    save_strategy="steps",
+    save_strategy="epoch",
     save_steps=500,
     # ↓ ここを変更
-    eval_strategy="steps",
+    eval_strategy="epoch",
+    load_best_model_at_end=True,
+    metric_for_best_model = "eval_loss",
+    greater_is_better=False,
     eval_steps=100,
     fp16=torch.cuda.is_available(),
     logging_strategy="steps",
     logging_steps=20,
     label_names=["labels"],
     remove_unused_columns=False,
+    max_grad_norm = 1.0,
+    # report_to="tensorboard",
 )
 
 
