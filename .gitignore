@@ -2,3 +2,4 @@ data/*
 checkpoints/*
 *.pt
 wandb/*
+sam2_ft/*
