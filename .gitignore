@@ -3,3 +3,4 @@ checkpoints/*
 *.pt
 wandb/*
 sam2_ft/*
+sam2_hiera_base_local/pytorch_model.bin

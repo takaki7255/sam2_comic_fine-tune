@@ -1,0 +1,16 @@
+{
+  "architectures": ["SamModel"],
+  "model_type": "hiera",
+  "vision_config": {
+    "image_size": 1024,
+    "patch_size": 16,
+    "num_hidden_layers": 12,
+    "hidden_size": 768,
+    "intermediate_size": 3072,
+    "num_attention_heads": 12,
+    "qkv_bias": true
+  },
+  "prompt_encoder_embed_dim": 256,
+  "mask_decoder_num_multimask_outputs": 3,
+  "torch_dtype": "float32"
+}
